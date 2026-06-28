@@ -56,6 +56,10 @@ pnpm test
 pnpm build
 ```
 
+## 交付说明
+
+更完整的实现思路、关键取舍、完成程度和后续扩展优先级见 [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md)。
+
 ## 部署
 
 默认推荐部署到 Vercel：

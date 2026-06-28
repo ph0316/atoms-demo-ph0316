@@ -15,6 +15,7 @@ import {
   Code2,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   History,
   Laptop,
@@ -73,6 +74,7 @@ const modeMeta: Record<BuilderMode, { label: string; icon: typeof Bot }> = {
 
 type BuildProgress = {
   id: string;
+  kind: "build" | "repair";
   prompt: string;
   mode: BuilderMode;
   createdAt: string;
@@ -83,6 +85,43 @@ type BuildProgress = {
 };
 
 type ConversationRun = RunRecord | BuildProgress;
+type VisualToken = "cobalt" | "mint" | "mono";
+
+const visualPalettes: Record<
+  VisualToken,
+  { label: string; color: string; primary: string; accent: string; bg: string; panel: string; text: string }
+> = {
+  cobalt: {
+    label: "Cobalt",
+    color: "#334bfa",
+    primary: "#334bfa",
+    accent: "#12a88a",
+    bg: "#eef3ff",
+    panel: "#ffffff",
+    text: "#15171c",
+  },
+  mint: {
+    label: "Mint",
+    color: "#0f8f72",
+    primary: "#0f8f72",
+    accent: "#334bfa",
+    bg: "#eef8f3",
+    panel: "#ffffff",
+    text: "#10231e",
+  },
+  mono: {
+    label: "Mono",
+    color: "#15171c",
+    primary: "#15171c",
+    accent: "#5b6472",
+    bg: "#f2f2f0",
+    panel: "#ffffff",
+    text: "#15171c",
+  },
+};
+
+const visualPatchStart = "/* atoms-visual-token:start */";
+const visualPatchEnd = "/* atoms-visual-token:end */";
 
 export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () => void }) {
   const [prompt, setPrompt] = useState(samplePrompts[0]);
@@ -99,7 +138,6 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
   const [issue, setIssue] = useState("");
   const [repairInstruction, setRepairInstruction] = useState("");
   const [publishUrl, setPublishUrl] = useState("");
-  const [permission, setPermission] = useState<PublishedSnapshot["permission"]>("link");
   const [previewMode, setPreviewMode] = useState<"desktop" | "mobile">("desktop");
   const [viewerMode, setViewerMode] = useState<"preview" | "code">("preview");
   const [candidates, setCandidates] = useState<GenerationCandidate[]>([]);
@@ -109,6 +147,7 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
   const [buildProgress, setBuildProgress] = useState<BuildProgress | null>(null);
   const [todayLabel, setTodayLabel] = useState("今天");
   const [sandpackKey, setSandpackKey] = useState(createId("sandpack"));
+  const [visualToken, setVisualToken] = useState<VisualToken>("cobalt");
 
   const replaceFiles = useCallback((nextFiles: SandpackFiles) => {
     setFiles(nextFiles);
@@ -166,19 +205,19 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
   useEffect(() => {
     if (!buildProgress || buildProgress.status !== "running") return;
 
-    const interval = window.setInterval(() => {
-      setBuildProgress((current) => {
-        if (!current || current.status !== "running") return current;
-        const nextPhase = Math.min(current.phase + 1, getBuildProgressPlan(current.mode).length - 1);
+	    const interval = window.setInterval(() => {
+	      setBuildProgress((current) => {
+	        if (!current || current.status !== "running") return current;
+	        const nextPhase = Math.min(current.phase + 1, getProgressPlan(current.kind, current.mode).length - 1);
 
-        return {
-          ...current,
-          phase: nextPhase,
-          message: getBuildProgressMessage(current.mode, nextPhase),
-          agentEvents: createProgressEvents(current.mode, current.prompt, nextPhase),
-        };
-      });
-    }, 1500);
+	        return {
+	          ...current,
+	          phase: nextPhase,
+	          message: getProgressMessage(current.kind, current.mode, nextPhase),
+	          agentEvents: createProgressEvents(current.kind, current.mode, current.prompt, nextPhase),
+	        };
+	      });
+	    }, 1500);
 
     return () => window.clearInterval(interval);
   }, [buildProgress]);
@@ -200,17 +239,18 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
     const buildPrompt = prompt.trim();
     if (!buildPrompt) return;
     const startedAt = nowIso();
-    setPrompt("");
-    setBuildProgress({
-      id: createId("pending-run"),
-      prompt: buildPrompt,
-      mode,
-      createdAt: startedAt,
-      status: "running",
-      message: getBuildProgressMessage(mode, 0),
-      phase: 0,
-      agentEvents: createProgressEvents(mode, buildPrompt, 0),
-    });
+	    setPrompt("");
+	    setBuildProgress({
+	      id: createId("pending-run"),
+	      kind: "build",
+	      prompt: buildPrompt,
+	      mode,
+	      createdAt: startedAt,
+	      status: "running",
+	      message: getProgressMessage("build", mode, 0),
+	      phase: 0,
+	      agentEvents: createProgressEvents("build", mode, buildPrompt, 0),
+	    });
     setStatus("Generating");
     setLoading(true);
     setCandidates([]);
@@ -273,11 +313,26 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
   }
 
   async function handleRepair() {
-    const issueText = issue || "请检查当前应用中的运行错误、布局溢出和交互问题。";
+    const issueText = issue.trim();
+    const instruction = repairInstruction.trim();
+    if (!issueText) return;
+    const repairPrompt = instruction ? `修复：${issueText}\n\n修复方向：${instruction}` : `修复：${issueText}`;
+    const startedAt = nowIso();
+    setBuildProgress({
+      id: createId("pending-repair"),
+      kind: "repair",
+      prompt: repairPrompt,
+      mode,
+      createdAt: startedAt,
+      status: "running",
+      message: getProgressMessage("repair", mode, 0),
+      phase: 0,
+      agentEvents: createProgressEvents("repair", mode, repairPrompt, 0),
+    });
     setStatus("Repairing");
     setLoading(true);
     try {
-      const result = await repairApp({ files, issue: issueText, instruction: repairInstruction });
+      const result = await repairApp({ files, issue: issueText, instruction: instruction || undefined });
       const nextFiles = normalizeFiles(result.files);
       replaceFiles(nextFiles);
       setViewerMode("preview");
@@ -294,17 +349,45 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
         await saveRun({
           projectId: project.id,
           mode,
-          prompt: repairInstruction ? `${issueText}\n\n修复方向：${repairInstruction}` : issueText,
+          prompt: repairPrompt,
           status: "success",
           message: result.fixSummary,
         });
         await refreshLists(project.id);
+      } else {
+        setRuns((current) => [
+          ...current,
+          {
+            id: createId("run"),
+            projectId: "snapshot",
+            mode,
+            prompt: repairPrompt,
+            status: "success",
+            createdAt: startedAt,
+            message: result.fixSummary,
+          },
+        ]);
       }
+      setBuildProgress(null);
       setIssue("");
       setRepairInstruction("");
       setStatus(result.usedFallback ? "Local fix" : "Fixed");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Repair failed");
+      const message = error instanceof Error ? error.message : "Repair failed";
+      setBuildProgress((current) =>
+        current
+          ? {
+              ...current,
+              status: "error",
+              message,
+              agentEvents: current.agentEvents.map((event, index, events) => ({
+                ...event,
+                status: index === events.length - 1 ? "error" : event.status === "running" ? "error" : event.status,
+              })),
+            }
+          : null,
+      );
+      setStatus(message);
     } finally {
       setLoading(false);
     }
@@ -352,7 +435,7 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
     setStatus(`Saved ${version.label}`);
   }
 
-  async function handlePublish() {
+  async function handlePublish(options: { copy?: boolean } = {}) {
     const title = project?.name ?? "Atoms Demo Snapshot";
     const url = buildSnapshotUrl({ title, files, createdAt: nowIso() });
     setPublishUrl(url);
@@ -364,37 +447,40 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
         files,
         agentEvents,
       }));
-      await saveSnapshot({
-        projectId: project.id,
-        versionId: version.id,
-        title,
-        permission,
-        url,
-        files,
-      });
-      await refreshLists(project.id);
+        await saveSnapshot({
+          projectId: project.id,
+          versionId: version.id,
+          title,
+          permission: "link",
+          url,
+          files,
+        });
+        await refreshLists(project.id);
+      }
+    setSummary(`已生成发布快照：${title}`);
+    if (options.copy) {
+      await copyShareUrl(url);
+      setStatus("Published copied");
+      return;
     }
     setStatus("Published");
   }
 
   async function handleCopy() {
     if (!publishUrl) return;
-    await navigator.clipboard.writeText(publishUrl);
+    await copyShareUrl(publishUrl);
+  }
+
+  async function copyShareUrl(url: string) {
+    await navigator.clipboard.writeText(url);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1300);
   }
 
-  function applyVisualToken(token: "cobalt" | "mint" | "mono") {
+  function applyVisualToken(token: VisualToken) {
     const styles = files["/src/styles.css"]?.code ?? "";
-    const palette =
-      token === "mint"
-        ? { primary: "#0f8f72", bg: "#eef8f3" }
-        : token === "mono"
-          ? { primary: "#15171c", bg: "#f2f2f0" }
-          : { primary: "#334bfa", bg: "#eef3ff" };
-    const nextStyles = styles
-      .replace(/#334bfa|#0f8f72|#15171c/g, palette.primary)
-      .replace(/#eef3ff|#eef8f3|#f2f2f0|#fff7e2/g, palette.bg);
+    const palette = visualPalettes[token];
+    const nextStyles = upsertVisualTokenCss(styles, palette);
     replaceFiles({
       ...files,
       "/src/styles.css": {
@@ -402,11 +488,15 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
         code: nextStyles,
       },
     });
+    setVisualToken(token);
+    setViewerMode("preview");
+    setSummary(`已套用 ${palette.label} 视觉风格`);
+    setStatus(`Visual ${palette.label}`);
   }
 
   return (
     <main className="h-screen overflow-hidden bg-[#f7f7f4] p-3 text-ink md:p-4">
-      <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[420px_minmax(0,1fr)]">
+      <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[520px_minmax(0,1fr)] xl:grid-cols-[560px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-line bg-white shadow-soft">
           <div className="border-b border-line px-4 py-3">
             <div className="flex items-center justify-between gap-3">
@@ -552,117 +642,33 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
               </ChatBubble>
             )}
 
-            <details className="group rounded-lg border border-line bg-white p-3">
-              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-black">
-                <span className="inline-flex items-center gap-2">
-                  <Paintbrush className="h-4 w-4 text-cobalt" />
-                  视觉与修复
-                </span>
-                <ChevronRight className="h-4 w-4 text-ink/45 transition group-open:rotate-90" />
-              </summary>
-              <div className="mt-3 space-y-3">
-                <div className="grid grid-cols-3 gap-2">
-                  <Swatch color="#334bfa" label="Cobalt" onClick={() => applyVisualToken("cobalt")} />
-                  <Swatch color="#0f8f72" label="Mint" onClick={() => applyVisualToken("mint")} />
-                  <Swatch color="#15171c" label="Mono" onClick={() => applyVisualToken("mono")} />
-                </div>
-                <textarea
-                  value={issue}
-                  onChange={(event) => setIssue(event.target.value)}
-                  className="h-24 w-full resize-none rounded-lg border border-line bg-panel p-3 text-sm outline-none focus:border-ember"
-                  placeholder="粘贴报错或描述问题"
-                />
-                <textarea
-                  value={repairInstruction}
-                  onChange={(event) => setRepairInstruction(event.target.value)}
-                  className="h-20 w-full resize-none rounded-lg border border-line bg-panel p-3 text-sm outline-none focus:border-ember"
-                  placeholder="可选修复方向"
-                />
-                <button
-                  type="button"
-                  onClick={handleRepair}
-                  disabled={loading}
-                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-ember px-4 text-sm font-black text-white disabled:opacity-60"
-                >
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
-                  Resolve
-                </button>
-              </div>
-            </details>
-
-            <details className="group rounded-lg border border-line bg-white p-3">
-              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-black">
-                <span className="inline-flex items-center gap-2">
-                  <Share2 className="h-4 w-4 text-cobalt" />
-                  发布与分享
-                </span>
-                <ChevronRight className="h-4 w-4 text-ink/45 transition group-open:rotate-90" />
-              </summary>
-              <div className="mt-3 space-y-3">
-                <div className="grid grid-cols-3 gap-2">
-                  {(["link", "public", "private"] as const).map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setPermission(item)}
-                      className={`h-10 rounded-lg border text-xs font-black ${
-                        permission === item ? "border-cobalt bg-cobalt text-white" : "border-line bg-white"
-                      }`}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={handlePublish}
-                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-cobalt px-4 text-sm font-black text-white"
-                >
-                  <Rocket className="h-4 w-4" />
-                  Publish
-                </button>
-                {publishUrl && (
-                  <div className="rounded-lg border border-line bg-panel p-3">
-                    <div className="mb-2 line-clamp-2 break-all text-xs text-ink/65">{publishUrl}</div>
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-line bg-white text-xs font-black text-ink"
-                    >
-                      {copied ? <Check className="h-4 w-4 text-mint" /> : <Copy className="h-4 w-4" />}
-                      Copy
-                    </button>
-                  </div>
-                )}
-                {snapshots.map((snapshot) => (
-                  <a
-                    key={snapshot.id}
-                    href={snapshot.url}
-                    className="block rounded-lg border border-line bg-white p-3 text-sm no-underline hover:border-cobalt"
-                  >
-                    <span className="block font-black text-ink">{snapshot.title}</span>
-                    <span className="text-xs text-ink/55">
-                      {snapshot.permission} · {new Date(snapshot.createdAt).toLocaleString()}
-                    </span>
-                  </a>
-                ))}
-              </div>
-            </details>
           </div>
 
-          <div className="border-t border-line bg-white p-4">
+          <div className="max-h-[36vh] shrink-0 overflow-y-auto overscroll-contain border-t border-line bg-white p-4">
             <label className="sr-only" htmlFor="prompt-composer">
               输入需求
             </label>
-            <textarea
-              id="prompt-composer"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              className="h-28 w-full resize-none rounded-lg border border-line bg-panel p-3 text-sm leading-6 outline-none focus:border-cobalt"
-              placeholder="输入你的应用需求，AI 的回复会出现在上方对话流"
-            />
-            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
-              <button
+	            <textarea
+	              id="prompt-composer"
+	              value={prompt}
+	              onChange={(event) => setPrompt(event.target.value)}
+	              className="h-20 w-full resize-none rounded-lg border border-line bg-panel p-3 text-sm leading-6 outline-none focus:border-cobalt"
+	              placeholder="输入你的应用需求，AI 的回复会出现在上方对话流"
+	            />
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+              {samplePrompts.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setPrompt(item)}
+                  className="shrink-0 rounded-full border border-line bg-white px-3 py-1.5 text-left text-xs font-bold text-ink/75 hover:border-cobalt"
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+	            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+	              <button
                 type="button"
                 onClick={handleGenerate}
                 disabled={loading}
@@ -681,18 +687,119 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
                 <Sparkles className="h-4 w-4" />
               </button>
             </div>
-            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-              {samplePrompts.map((item) => (
+            <details className="group mt-3 rounded-lg border border-line bg-panel/55 p-3">
+              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-black">
+                <span className="inline-flex items-center gap-2">
+                  <Share2 className="h-4 w-4 text-cobalt" />
+                  发布与分享
+                </span>
+                <ChevronRight className="h-4 w-4 text-ink/45 transition group-open:rotate-90" />
+	              </summary>
+	              <div className="mt-3 space-y-3">
+	                <div className="grid grid-cols-[1fr_auto] gap-2">
+	                  <button
+                    type="button"
+                    onClick={() => handlePublish({ copy: true })}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cobalt px-4 text-sm font-black text-white"
+                  >
+                    {copied ? <Check className="h-4 w-4" /> : <Rocket className="h-4 w-4" />}
+                    {copied ? "已复制链接" : "发布并复制链接"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => exportZip(files, project?.name ?? "atoms-demo")}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-line bg-white text-ink hover:border-cobalt"
+                    title="导出 ZIP"
+                    aria-label="导出 ZIP"
+                  >
+                    <Download className="h-4 w-4" />
+                  </button>
+                </div>
+                {publishUrl && (
+                  <div className="rounded-lg border border-line bg-white p-3">
+                    <div className="mb-2 line-clamp-2 break-all text-xs text-ink/65">{publishUrl}</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCopy}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-line bg-panel text-xs font-black text-ink hover:border-cobalt"
+                      >
+                        {copied ? <Check className="h-4 w-4 text-mint" /> : <Copy className="h-4 w-4" />}
+                        复制链接
+                      </button>
+                      <a
+                        href={publishUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-line bg-panel text-xs font-black text-ink no-underline hover:border-cobalt"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                        打开快照
+                      </a>
+                    </div>
+                  </div>
+                )}
+                {snapshots.slice(0, 3).map((snapshot) => (
+                  <a
+                    key={snapshot.id}
+                    href={snapshot.url}
+                    className="block rounded-lg border border-line bg-white p-3 text-sm no-underline hover:border-cobalt"
+                  >
+                    <span className="block truncate font-black text-ink">{snapshot.title}</span>
+                    <span className="text-xs text-ink/55">{new Date(snapshot.createdAt).toLocaleString()}</span>
+                  </a>
+                ))}
+	              </div>
+            </details>
+            <details className="group mt-3 rounded-lg border border-line bg-panel/55 p-3">
+              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-black">
+                <span className="inline-flex items-center gap-2">
+                  <Paintbrush className="h-4 w-4 text-cobalt" />
+                  视觉风格与问题修复
+                </span>
+                <ChevronRight className="h-4 w-4 text-ink/45 transition group-open:rotate-90" />
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {(Object.entries(visualPalettes) as Array<[VisualToken, (typeof visualPalettes)[VisualToken]]>).map(
+                    ([token, palette]) => (
+                      <Swatch
+                        key={token}
+                        color={palette.color}
+                        label={palette.label}
+                        active={visualToken === token}
+                        onClick={() => applyVisualToken(token)}
+                      />
+                    ),
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-ink/45">
+                  <span>当前：{visualPalettes[visualToken].label}</span>
+                  <span>{issue.trim() ? "可提交修复" : "填写问题后可修复"}</span>
+                </div>
+                <textarea
+                  value={issue}
+                  onChange={(event) => setIssue(event.target.value)}
+                  className="h-20 w-full resize-none rounded-lg border border-line bg-white p-3 text-sm outline-none focus:border-ember"
+                  placeholder="描述预览错误、白屏、布局问题"
+                />
+                <textarea
+                  value={repairInstruction}
+                  onChange={(event) => setRepairInstruction(event.target.value)}
+                  className="h-16 w-full resize-none rounded-lg border border-line bg-white p-3 text-sm outline-none focus:border-ember"
+                  placeholder="修复方向（可选）"
+                />
                 <button
-                  key={item}
                   type="button"
-                  onClick={() => setPrompt(item)}
-                  className="shrink-0 rounded-full border border-line bg-white px-3 py-1.5 text-left text-xs font-bold text-ink/75 hover:border-cobalt"
+                  onClick={handleRepair}
+                  disabled={loading || !issue.trim()}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-ember px-4 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-45"
                 >
-                  {item}
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+                  修复当前应用
                 </button>
-              ))}
-            </div>
+              </div>
+            </details>
             <details className="group mt-3 rounded-lg border border-line bg-panel/55 p-3">
               <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-black">
                 <span className="inline-flex items-center gap-2">
@@ -814,7 +921,7 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
               >
                 <Check className="h-4 w-4" />
               </IconButton>
-              <IconButton title="发布" tooltip="发布快照：生成可分享链接" onClick={handlePublish}>
+              <IconButton title="发布" tooltip="发布快照：生成可分享链接" onClick={() => handlePublish()}>
                 <Rocket className="h-4 w-4" />
               </IconButton>
               <IconButton
@@ -842,14 +949,14 @@ export function Workspace({ currentUser, onLogout }: { currentUser: AuthUser; on
               <PreviewFrameClamp watchKey={`${sandpackKey}:${viewerMode}:${previewMode}`} />
               <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)] overflow-auto overscroll-contain">
                 <div
-                  className={`sandpack-wrapper sandpack-preview-shell col-start-1 row-start-1 h-full max-h-full min-h-0 overflow-hidden bg-[#f8f8f5] p-3 transition-opacity ${
+                  className={`sandpack-wrapper sandpack-preview-shell col-start-1 row-start-1 h-full max-h-full min-h-0 overflow-auto bg-[#f8f8f5] p-3 transition-opacity ${
                     viewerMode === "preview" ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
                   }`}
                   aria-hidden={viewerMode !== "preview"}
                 >
                   <div
-                    className={`mx-auto h-full max-h-full overflow-hidden rounded-lg border border-line bg-white ${
-                      previewMode === "mobile" ? "max-w-[390px]" : "w-full"
+                    className={`h-full min-h-full overflow-auto rounded-lg border border-line bg-white ${
+                      previewMode === "mobile" ? "w-[390px] max-w-full shrink-0" : "w-full min-w-full"
                     }`}
                   >
                     <SandpackLayout>
@@ -989,8 +1096,15 @@ function isBuildProgress(run: ConversationRun): run is BuildProgress {
 }
 
 function getRunSubtitle(run: ConversationRun) {
-  if (isBuildProgress(run)) return run.status === "running" ? "正在构建" : "构建失败";
+  if (isBuildProgress(run)) {
+    if (run.kind === "repair") return run.status === "running" ? "正在修复" : "修复失败";
+    return run.status === "running" ? "正在构建" : "构建失败";
+  }
   return run.status === "success" ? "已完成" : "需要处理";
+}
+
+function getProgressPlan(kind: BuildProgress["kind"], mode: BuilderMode) {
+  return kind === "repair" ? getRepairProgressPlan() : getBuildProgressPlan(mode);
 }
 
 function getBuildProgressPlan(mode: BuilderMode) {
@@ -1080,18 +1194,48 @@ function getBuildProgressPlan(mode: BuilderMode) {
   ];
 }
 
-function getBuildProgressMessage(mode: BuilderMode, phase: number) {
-  const step = getBuildProgressPlan(mode)[phase] ?? getBuildProgressPlan(mode).at(-1);
-  return step ? `${step.agent} 正在${step.title}：${step.detail}` : "AI 正在生成应用。";
+function getRepairProgressPlan() {
+  return [
+    {
+      agent: "System" as const,
+      role: "Issue Report",
+      title: "接收修复意见",
+      detail: "正在整理问题描述、当前文件和可复现线索。",
+    },
+    {
+      agent: "Alex" as const,
+      role: "Software Engineer",
+      title: "检查应用代码",
+      detail: "正在定位预览错误、布局问题和可能的运行异常。",
+    },
+    {
+      agent: "Alex" as const,
+      role: "Software Engineer",
+      title: "应用修复",
+      detail: "正在重写受影响文件，并准备刷新右侧预览。",
+    },
+  ];
 }
 
-function createProgressEvents(mode: BuilderMode, promptText: string, activePhase: number): AgentEvent[] {
-  return getBuildProgressPlan(mode).map((step, index) => ({
-    id: `progress-${mode}-${index}`,
+function getProgressMessage(kind: BuildProgress["kind"], mode: BuilderMode, phase: number) {
+  const plan = getProgressPlan(kind, mode);
+  const step = plan[phase] ?? plan.at(-1);
+  if (!step) return kind === "repair" ? "AI 正在修复应用。" : "AI 正在生成应用。";
+  return `${step.agent} 正在${step.title}：${step.detail}`;
+}
+
+function createProgressEvents(
+  kind: BuildProgress["kind"],
+  mode: BuilderMode,
+  promptText: string,
+  activePhase: number,
+): AgentEvent[] {
+  return getProgressPlan(kind, mode).map((step, index) => ({
+    id: `progress-${kind}-${mode}-${index}`,
     agent: step.agent,
     role: step.role,
     title: step.title,
-    detail: index === 0 ? `${step.detail}\n需求：${promptText}` : step.detail,
+    detail: index === 0 ? `${step.detail}\n${kind === "repair" ? "修复意见" : "需求"}：${promptText}` : step.detail,
     status: index < activePhase ? "done" : index === activePhase ? "running" : "queued",
     createdAt: nowIso(),
   }));
@@ -1113,14 +1257,14 @@ function ChatBubble({
   const isUser = role === "user";
 
   return (
-    <article className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
-      {!isUser && (
-        <div className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-cobalt text-white">
-          <Bot className="h-4 w-4" />
-        </div>
-      )}
-      <div className={`min-w-0 flex-1 ${isUser ? "max-w-[92%]" : ""}`}>
+    <article className="w-full">
+      <div className={`min-w-0 ${isUser ? "ml-auto max-w-[98%]" : "w-full"}`}>
         <div className={`mb-1 flex items-center gap-2 text-xs font-black text-ink/50 ${isUser ? "justify-end" : ""}`}>
+          {!isUser && (
+            <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cobalt text-white">
+              <Bot className="h-3.5 w-3.5" />
+            </span>
+          )}
           <span>{title}</span>
           {subtitle && <span className="font-bold">{subtitle}</span>}
           {time && <span className="font-bold">{time}</span>}
@@ -1173,13 +1317,77 @@ function IconButton({
   );
 }
 
-function Swatch({ color, label, onClick }: { color: string; label: string; onClick: () => void }) {
+function upsertVisualTokenCss(styles: string, palette: (typeof visualPalettes)[VisualToken]) {
+  const patch = `${visualPatchStart}
+:root {
+  --atoms-primary: ${palette.primary};
+  --atoms-accent: ${palette.accent};
+  --atoms-bg: ${palette.bg};
+  --atoms-panel: ${palette.panel};
+  --atoms-text: ${palette.text};
+}
+body {
+  background: var(--atoms-bg) !important;
+  color: var(--atoms-text);
+}
+body main,
+body .shell,
+body .app,
+body .page {
+  background-color: var(--atoms-bg) !important;
+}
+body button:not(:disabled),
+body [role="button"] {
+  border-color: var(--atoms-primary) !important;
+}
+body button:not(:disabled):where(:not(.ghost):not(.secondary)),
+body .primary,
+body .cta {
+  background: var(--atoms-primary) !important;
+  color: #fff !important;
+}
+body a,
+body h1,
+body h2,
+body h3,
+body svg {
+  color: var(--atoms-primary);
+}
+body input:focus,
+body textarea:focus,
+body select:focus {
+  outline-color: var(--atoms-primary);
+  border-color: var(--atoms-primary) !important;
+}
+${visualPatchEnd}`;
+  const patchPattern = new RegExp(`${escapeRegExp(visualPatchStart)}[\\s\\S]*?${escapeRegExp(visualPatchEnd)}\\n?`, "g");
+  const baseStyles = styles.replace(patchPattern, "").trimEnd();
+  return `${baseStyles}\n\n${patch}\n`;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function Swatch({
+  color,
+  label,
+  active,
+  onClick,
+}: {
+  color: string;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex h-14 flex-col items-center justify-center gap-1 rounded-lg border border-line bg-white text-xs font-black"
-      title={label}
+      className={`flex h-14 flex-col items-center justify-center gap-1 rounded-lg border bg-white text-xs font-black transition ${
+        active ? "border-cobalt ring-2 ring-cobalt/20" : "border-line hover:border-cobalt"
+      }`}
+      title={`套用 ${label} 风格`}
     >
       <span className="h-5 w-5 rounded-full border border-black/10" style={{ background: color }} />
       {label}

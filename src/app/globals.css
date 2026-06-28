@@ -45,7 +45,7 @@ button {
   grid-template-rows: minmax(0, 1fr);
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .sandpack-wrapper .sp-layout {
@@ -80,5 +80,9 @@ button {
 
 .sandpack-preview-shell .sp-preview,
 .sandpack-preview-shell .sp-preview-container {
-  overflow: hidden;
+  overflow: auto;
+}
+
+.sandpack-preview-shell iframe {
+  overflow: auto;
 }
